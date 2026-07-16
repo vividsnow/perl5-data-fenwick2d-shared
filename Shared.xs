@@ -9,7 +9,8 @@
     if (!sv_isobject(sv) || !sv_derived_from(sv, "Data::Fenwick2D::Shared")) \
         croak("Expected a Data::Fenwick2D::Shared object"); \
     F2dHandle *h = INT2PTR(F2dHandle*, SvIV(SvRV(sv))); \
-    if (!h) croak("Attempted to use a destroyed Data::Fenwick2D::Shared object")
+    if (!h) croak("Attempted to use a destroyed Data::Fenwick2D::Shared object"); \
+    sv_2mortal(SvREFCNT_inc(SvRV(sv)))
 
 #define MAKE_OBJ(class, handle) \
     SV *obj = newSViv(PTR2IV(handle)); \
@@ -36,11 +37,13 @@ new(class, path = &PL_sv_undef, rows = 0, cols = 0, ...)
   PREINIT:
     char errbuf[F2D_ERR_BUFLEN];
   CODE:
-    const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     if (rows < 1 || cols < 1)
         croak("Data::Fenwick2D::Shared->new: rows and cols must be >= 1");
     /* Optional 5th arg: file mode for a newly-created file-backed segment (default 0600). */
     mode_t mode = (items > 4 && (SvGETMAGIC(ST(4)), SvOK(ST(4)))) ? (mode_t)SvUV(ST(4)) : 0600;
+    /* Capture the path PV last, after all get-magic on the optional args:
+       SvGETMAGIC(ST(4)) above could realloc/free the PV before f2d_create() uses it. */
+    const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     F2dHandle *hh = f2d_create(p, (uint64_t)rows, (uint64_t)cols, mode, errbuf);
     if (!hh) croak("Data::Fenwick2D::Shared->new: %s", errbuf);
     MAKE_OBJ(class, hh);

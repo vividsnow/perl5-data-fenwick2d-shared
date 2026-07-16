@@ -1,9 +1,5 @@
 Revision history for Data-Fenwick2D-Shared
 
-0.01      2026-07-12
-          - Initial release. Shared-memory 2-D Fenwick tree (binary indexed
-            tree): a rows x cols grid of signed int64 cells with O(log rows *
-            log cols) point update and rectangle-sum query (prefix / rect /
-            point / total), shared across processes via a backing file, an
-            anonymous mapping inherited across fork, or a memfd; guarded by a
-            write-preferring futex rwlock with dead-process recovery.
+0.01      2026-07-21
+          - Initial release.
+
