@@ -46,6 +46,11 @@ new(class, path = &PL_sv_undef, rows = 0, cols = 0, ...)
     const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     F2dHandle *hh = f2d_create(p, (uint64_t)rows, (uint64_t)cols, mode, errbuf);
     if (!hh) croak("Data::Fenwick2D::Shared->new: %s", errbuf);
+    /* Re-read the class PV at the point of use: xsubpp captured it in INPUT,
+     * before the argument magic above ran, and that magic can realloc/free
+     * the PV, leaving MAKE_OBJ to bless into a stale (or reused) buffer.
+     * SvPV_nolen, not SvPV_nomg: an overloaded class must re-stringify. */
+    class = SvPV_nolen(ST(0));
     MAKE_OBJ(class, hh);
   OUTPUT:
     RETVAL
@@ -64,6 +69,10 @@ new_memfd(class, name = &PL_sv_undef, rows = 0, cols = 0)
         croak("Data::Fenwick2D::Shared->new_memfd: rows and cols must be >= 1");
     F2dHandle *hh = f2d_create_memfd(nm, (uint64_t)rows, (uint64_t)cols, errbuf);
     if (!hh) croak("Data::Fenwick2D::Shared->new_memfd: %s", errbuf);
+    /* Re-read the class PV at the point of use (see new() above): the rows/
+     * cols INPUT conversions and the name magic both ran after xsubpp
+     * captured class. */
+    class = SvPV_nolen(ST(0));
     MAKE_OBJ(class, hh);
   OUTPUT:
     RETVAL
@@ -77,6 +86,9 @@ new_from_fd(class, fd)
   CODE:
     F2dHandle *hh = f2d_open_fd(fd, errbuf);
     if (!hh) croak("Data::Fenwick2D::Shared->new_from_fd: %s", errbuf);
+    /* Re-read the class PV at the point of use (see new() above): fd's INPUT
+     * conversion ran get-magic after xsubpp captured class. */
+    class = SvPV_nolen(ST(0));
     MAKE_OBJ(class, hh);
   OUTPUT:
     RETVAL
