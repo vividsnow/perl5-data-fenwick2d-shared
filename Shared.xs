@@ -10,7 +10,36 @@
         croak("Expected a Data::Fenwick2D::Shared object"); \
     F2dHandle *h = INT2PTR(F2dHandle*, SvIV(SvRV(sv))); \
     if (!h) croak("Attempted to use a destroyed Data::Fenwick2D::Shared object"); \
+    F2dHandle *h0 = h; PERL_UNUSED_VAR(h0); \
     sv_2mortal(SvREFCNT_inc(SvRV(sv)))
+
+/* Re-read the handle after a call that can run Perl code. EXTRACT's
+ * sv_2mortal(SvREFCNT_inc(...)) pin only blocks REFCOUNT-driven destruction;
+ * an explicit $obj->DESTROY frees the handle regardless and zeroes the IV.
+ * sv_isobject/sv_derived_from both BEGIN with SvGETMAGIC, so a tied argument
+ * runs Perl there. The same Perl can also REPLACE the invocant ($obj = 42
+ * mutates ST(0), because Perl passes aliases), hence the SvROK re-check.
+ *
+ * Used only where magic can actually intervene between EXTRACT and the first
+ * use of h: every x/y/delta/value argument on this module's instance methods
+ * is a plain typemap UV/IV, which xsubpp converts in INPUT, before PREINIT's
+ * EXTRACT runs (verified against the generated Shared.c) -- so no current
+ * instance method has an "extract, then convert, then use a stale h" window
+ * to close here. This mirrors Data::Fenwick::Shared (this module's 1D
+ * analog): its update/set/prefix/rect-equivalent range/point/total all skip
+ * REEXTRACT for the same reason, and only merge() -- which manually extracts
+ * a second SV after EXTRACT -- needs one. Kept for parity with the rest of
+ * the family and ready for any future method that manually converts an SV,
+ * or takes a second object, after extracting the handle. When it is needed,
+ * the correct order is EXTRACT -> convert args -> REEXTRACT -> take the lock
+ * -> operate: this module's methods lock h (~25 lock call sites), so a stale
+ * h re-checked only after locking would already have dereferenced (and
+ * possibly deadlocked via) freed memory. */
+#define REEXTRACT(sv) \
+    if (!SvROK(sv)) \
+        croak("Data::Fenwick2D::Shared object was replaced during the call"); \
+    h = INT2PTR(F2dHandle*, SvIV(SvRV(sv))); \
+    if (h != h0) croak("Data::Fenwick2D::Shared object replaced or destroyed during the call")
 
 #define MAKE_OBJ(class, handle) \
     SV *obj = newSViv(PTR2IV(handle)); \
