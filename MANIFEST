@@ -8,6 +8,7 @@ MANIFEST.SKIP
 README
 Shared.xs
 t/01-basic.t
+t/02-frozen.t
 xt/asan.t
 xt/class_pv_magic.t
 xt/crash_recovery.t

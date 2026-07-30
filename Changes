@@ -1,5 +1,8 @@
 Revision history for Data-Fenwick2D-Shared
 
 0.01      2026-07-23
+          - Add a frozen read-only mode: freeze() seals a file-backed structure
+            immutable; new_readonly() opens it O_RDONLY / PROT_READ and queries
+            it lock-free.
           - Initial release.
 

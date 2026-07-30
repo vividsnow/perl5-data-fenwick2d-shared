@@ -35,6 +35,11 @@ Data::Fenwick2D::Shared - shared-memory 2-D Fenwick tree (binary indexed tree) f
     # share the grid across processes via a backing file
     my $shared = Data::Fenwick2D::Shared->new("/tmp/heatmap.f2d", 24, 7);
 
+    # freeze and ship: query it read-only (lock-free) on other machines
+    $shared->freeze;
+    my $ro = Data::Fenwick2D::Shared->new_readonly("/tmp/heatmap.f2d");
+    $ro->point(22, 5);
+
 =head1 DESCRIPTION
 
 A B<2-D Fenwick tree> (binary indexed tree) in shared memory: a fixed
@@ -72,6 +77,7 @@ Requires 64-bit Perl.
     my $grid = Data::Fenwick2D::Shared->new(undef, $rows, $cols);      # anonymous
     my $grid = Data::Fenwick2D::Shared->new_memfd($name, $rows, $cols);
     my $grid = Data::Fenwick2D::Shared->new_from_fd($fd);
+    my $ro   = Data::Fenwick2D::Shared->new_readonly($path);           # frozen file, read-only
 
 C<$rows> and C<$cols> are the grid dimensions (each at least 1, up to 2^24); cells
 are then addressed as C<(1..$rows, 1..$cols)>. Every cell starts at 0. C<new> and
@@ -79,7 +85,8 @@ C<new_memfd> croak if a dimension is below 1 or above the cap. When reopening an
 existing file or memfd the stored dimensions win and the caller's arguments are
 ignored. An optional file B<mode> may be passed as the last argument to C<new>
 (e.g. C<0660>) to opt a newly-created backing file into cross-user sharing; it
-defaults to C<0600> (owner-only).
+defaults to C<0600> (owner-only). C<new_readonly> opens a B<frozen> file
+read-only for lock-free querying (see L</"FROZEN (READ-ONLY) MODE">).
 
 =head2 Updating
 
@@ -110,15 +117,17 @@ run concurrently.
 =head2 Introspection and lifecycle
 
     $grid->rows; $grid->cols;    # the grid dimensions
-    $grid->stats;                # { rows, cols, total, ops, mmap_size }
+    $grid->stats;                # { rows, cols, total, ops, mmap_size, frozen, readonly }
     $grid->path; $grid->memfd; $grid->sync; $grid->unlink;
 
 C<stats> returns a hash reference with the dimensions, the current grand total,
-the running count of write-path operations, and the mapping size. C<sync> flushes
-the mapping to its backing store (a no-op for anonymous and memfd grids);
-C<unlink> removes the backing file (also callable as C<< Class->unlink($path) >>);
-C<path> returns the backing path (C<undef> for anonymous, memfd, or fd-reopened
-grids) and C<memfd> the backing descriptor.
+the running count of write-path operations, the mapping size, whether the grid
+has been sealed by C<freeze> (C<frozen>), and whether this handle is a
+read-only view (C<readonly>; see L</"FROZEN (READ-ONLY) MODE">). C<sync> flushes
+the mapping to its backing store (a no-op for anonymous and memfd grids, and for
+a read-only handle); C<unlink> removes the backing file (also callable as
+C<< Class->unlink($path) >>); C<path> returns the backing path (C<undef> for
+anonymous, memfd, or fd-reopened grids) and C<memfd> the backing descriptor.
 
 =head1 SHARING ACROSS PROCESSES
 
@@ -127,6 +136,43 @@ family: a B<backing file>, an B<anonymous mapping inherited across C<fork>>, or 
 B<memfd> passed to an unrelated process and reopened with
 C<< new_from_fd($fd) >>. Every process's updates land in the one shared grid, and
 queries take only the read lock so many readers proceed concurrently.
+
+=head1 FROZEN (READ-ONLY) MODE
+
+A file-backed grid can be B<frozen> and then shipped to other machines, where
+consumers open it B<read-only> and query it with B<no locking at all>.
+
+    # producer: build, freeze, ship the file
+    my $grid = Data::Fenwick2D::Shared->new("/tmp/heatmap.f2d", 24, 7);
+    $grid->update(9, 1, 12);
+    $grid->freeze;                 # seal: now immutable, and $grid itself is read-only
+    # ... copy /tmp/heatmap.f2d to another host ...
+
+    # consumer (any process, same architecture): read-only, lock-free
+    my $ro = Data::Fenwick2D::Shared->new_readonly("/tmp/heatmap.f2d");
+    $ro->rect(8, 1, 12, 5);
+
+C<freeze> takes the write lock, marks the grid B<permanently immutable> (there
+is no unfreeze -- rebuild the file to change it), and flushes the seal to disk.
+A frozen grid rejects every mutator (C<update>, C<set>, C<clear>) with a croak,
+and a read-write reopen (C<< new($path, ...) >> or C<new_from_fd>) of a sealed
+file is B<refused> -- so a shipped artifact can never be silently mutated out
+from under its readers.
+
+C<new_readonly($path)> maps the file C<O_RDONLY> / C<PROT_READ> and B<requires
+it to be frozen> (it croaks on a file that was never C<freeze>d). Because a
+sealed grid's cells and geometry are immutable, C<prefix>, C<rect>, C<point>,
+C<total>, and C<stats> read them B<directly, taking no reader lock> -- the
+mapping is never written, so a read-only view works from a read-only file
+descriptor or a read-only filesystem, and any number of processes can share one
+C<PROT_READ> mapping. C<frozen> and C<readonly> report the two states.
+
+B<Portability.> The on-disk format is native binary (native-endian 64-bit
+words), so a frozen file may be copied only between machines of the B<same
+architecture>; a wrong-endian file is rejected at open by the magic check.
+B<Copy the file to each consumer> -- do not share one file over a network
+filesystem: the lock is a Linux futex (process-local to one kernel), and the
+"no live writer" contract assumes a static copy. Linux-only; 64-bit Perl.
 
 =head1 SECURITY
 

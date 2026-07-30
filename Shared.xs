@@ -122,6 +122,26 @@ new_from_fd(class, fd)
   OUTPUT:
     RETVAL
 
+SV *
+new_readonly(class, path)
+    const char *class
+    SV *path
+  PREINIT:
+    char errbuf[F2D_ERR_BUFLEN];
+  CODE:
+    /* Open a FROZEN (sealed) file read-only: O_RDONLY + PROT_READ, lock-free.
+       Requires ->freeze on the producer; a non-frozen file is refused. */
+    const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
+    if (!p) croak("Data::Fenwick2D::Shared->new_readonly: path is required");
+    F2dHandle *hh = f2d_open_readonly(p, errbuf);
+    if (!hh) croak("Data::Fenwick2D::Shared->new_readonly: %s", errbuf);
+    /* Re-read the class PV at the point of use (see new() above): path's
+     * get-magic above could have run Perl code that reallocs/frees it. */
+    class = SvPV_nolen(ST(0));
+    MAKE_OBJ(class, hh);
+  OUTPUT:
+    RETVAL
+
 void
 DESTROY(self)
     SV *self
@@ -142,8 +162,10 @@ update(self, x, y, delta)
   PREINIT:
     EXTRACT(self);
   CODE:
+    if (h->readonly) croak("Data::Fenwick2D::Shared->update: structure is frozen (read-only)");
     CHECK_XY(x, y);
     f2d_rwlock_wrlock(h);
+    if (h->hdr->sealed) { f2d_rwlock_wrunlock(h); croak("Data::Fenwick2D::Shared->update: structure is frozen (read-only)"); }
     f2d_update_locked(h, (uint64_t)x, (uint64_t)y, (int64_t)delta);
     __atomic_fetch_add(&h->hdr->stat_ops, 1, __ATOMIC_RELAXED);
     f2d_rwlock_wrunlock(h);
@@ -158,8 +180,10 @@ set(self, x, y, value)
     EXTRACT(self);
     int64_t cur;
   CODE:
+    if (h->readonly) croak("Data::Fenwick2D::Shared->set: structure is frozen (read-only)");
     CHECK_XY(x, y);
     f2d_rwlock_wrlock(h);
+    if (h->hdr->sealed) { f2d_rwlock_wrunlock(h); croak("Data::Fenwick2D::Shared->set: structure is frozen (read-only)"); }
     cur = f2d_point_locked(h, (uint64_t)x, (uint64_t)y);           /* current value at (x,y) */
     f2d_update_locked(h, (uint64_t)x, (uint64_t)y, (int64_t)value - cur);
     __atomic_fetch_add(&h->hdr->stat_ops, 1, __ATOMIC_RELAXED);
@@ -174,10 +198,42 @@ clear(self)
   PREINIT:
     EXTRACT(self);
   CODE:
+    if (h->readonly) croak("Data::Fenwick2D::Shared->clear: structure is frozen (read-only)");
     f2d_rwlock_wrlock(h);
+    if (h->hdr->sealed) { f2d_rwlock_wrunlock(h); croak("Data::Fenwick2D::Shared->clear: structure is frozen (read-only)"); }
     f2d_clear_locked(h);
     __atomic_fetch_add(&h->hdr->stat_ops, 1, __ATOMIC_RELAXED);
     f2d_rwlock_wrunlock(h);
+
+void
+freeze(self)
+    SV *self
+  PREINIT:
+    EXTRACT(self);
+  CODE:
+    if (h->readonly) croak("Data::Fenwick2D::Shared->freeze: cannot freeze a read-only handle");
+    if (f2d_freeze(h) != 0) croak("Data::Fenwick2D::Shared->freeze: msync: %s", strerror(errno));
+    h->readonly = 1;   /* this handle now rejects mutation too (the file is sealed) */
+
+UV
+frozen(self)
+    SV *self
+  PREINIT:
+    EXTRACT(self);
+  CODE:
+    RETVAL = h->hdr->sealed ? 1 : 0;
+  OUTPUT:
+    RETVAL
+
+UV
+readonly(self)
+    SV *self
+  PREINIT:
+    EXTRACT(self);
+  CODE:
+    RETVAL = h->readonly ? 1 : 0;
+  OUTPUT:
+    RETVAL
 
 # ---- query ----
 
@@ -193,9 +249,13 @@ prefix(self, x, y)
     if (x > h->rows || y > h->cols)
         croak("Data::Fenwick2D::Shared->prefix: (%" UVuf ",%" UVuf ") out of range 0..%" UVuf " x 0..%" UVuf,
               (UV)x, (UV)y, (UV)h->rows, (UV)h->cols);
-    f2d_rwlock_rdlock(h);
-    s = f2d_prefix_locked(h, (uint64_t)x, (uint64_t)y);
-    f2d_rwlock_rdunlock(h);
+    if (h->readonly) {
+        s = f2d_prefix_locked(h, (uint64_t)x, (uint64_t)y);
+    } else {
+        f2d_rwlock_rdlock(h);
+        s = f2d_prefix_locked(h, (uint64_t)x, (uint64_t)y);
+        f2d_rwlock_rdunlock(h);
+    }
     RETVAL = (IV)s;
   OUTPUT:
     RETVAL
@@ -214,9 +274,13 @@ rect(self, x1, y1, x2, y2)
     if (x1 < 1 || y1 < 1 || x2 > h->rows || y2 > h->cols || x1 > x2 || y1 > y2)
         croak("Data::Fenwick2D::Shared->rect: bad rectangle [%" UVuf ",%" UVuf "]..[%" UVuf ",%" UVuf "] (valid 1..%" UVuf " x 1..%" UVuf ")",
               (UV)x1, (UV)y1, (UV)x2, (UV)y2, (UV)h->rows, (UV)h->cols);
-    f2d_rwlock_rdlock(h);
-    s = f2d_rect_locked(h, (uint64_t)x1, (uint64_t)y1, (uint64_t)x2, (uint64_t)y2);
-    f2d_rwlock_rdunlock(h);
+    if (h->readonly) {
+        s = f2d_rect_locked(h, (uint64_t)x1, (uint64_t)y1, (uint64_t)x2, (uint64_t)y2);
+    } else {
+        f2d_rwlock_rdlock(h);
+        s = f2d_rect_locked(h, (uint64_t)x1, (uint64_t)y1, (uint64_t)x2, (uint64_t)y2);
+        f2d_rwlock_rdunlock(h);
+    }
     RETVAL = (IV)s;
   OUTPUT:
     RETVAL
@@ -231,9 +295,13 @@ point(self, x, y)
     int64_t s;
   CODE:
     CHECK_XY(x, y);
-    f2d_rwlock_rdlock(h);
-    s = f2d_point_locked(h, (uint64_t)x, (uint64_t)y);
-    f2d_rwlock_rdunlock(h);
+    if (h->readonly) {
+        s = f2d_point_locked(h, (uint64_t)x, (uint64_t)y);
+    } else {
+        f2d_rwlock_rdlock(h);
+        s = f2d_point_locked(h, (uint64_t)x, (uint64_t)y);
+        f2d_rwlock_rdunlock(h);
+    }
     RETVAL = (IV)s;
   OUTPUT:
     RETVAL
@@ -245,9 +313,13 @@ total(self)
     EXTRACT(self);
     int64_t s;
   CODE:
-    f2d_rwlock_rdlock(h);
-    s = f2d_prefix_locked(h, h->rows, h->cols);
-    f2d_rwlock_rdunlock(h);
+    if (h->readonly) {
+        s = f2d_prefix_locked(h, h->rows, h->cols);
+    } else {
+        f2d_rwlock_rdlock(h);
+        s = f2d_prefix_locked(h, h->rows, h->cols);
+        f2d_rwlock_rdunlock(h);
+    }
     RETVAL = (IV)s;
   OUTPUT:
     RETVAL
@@ -284,10 +356,10 @@ stats(self)
         uint64_t rr, cc, ops, mmap_size;
         int64_t  tot;
         rr = h->rows; cc = h->cols;
-        f2d_rwlock_rdlock(h);
+        if (!h->readonly) f2d_rwlock_rdlock(h);   /* frozen: immutable grid, no lock */
         tot       = f2d_prefix_locked(h, rr, cc);
         ops       = h->hdr->stat_ops;
-        f2d_rwlock_rdunlock(h);
+        if (!h->readonly) f2d_rwlock_rdunlock(h);
         mmap_size = (uint64_t)h->mmap_size;
 
         HV *hv = newHV();
@@ -296,6 +368,8 @@ stats(self)
         hv_stores(hv, "total",     newSViv((IV)tot));
         hv_stores(hv, "ops",       newSVuv((UV)ops));
         hv_stores(hv, "mmap_size", newSVuv((UV)mmap_size));
+        hv_stores(hv, "frozen",    newSVuv(h->hdr->sealed ? 1 : 0));
+        hv_stores(hv, "readonly",  newSVuv(h->readonly ? 1 : 0));
         RETVAL = newRV_noinc((SV *)hv);
     }
   OUTPUT:
@@ -327,7 +401,7 @@ sync(self)
   PREINIT:
     EXTRACT(self);
   CODE:
-    if (f2d_msync(h) != 0) croak("sync: %s", strerror(errno));
+    if (!h->readonly && f2d_msync(h) != 0) croak("sync: %s", strerror(errno));
 
 void
 unlink(self, ...)

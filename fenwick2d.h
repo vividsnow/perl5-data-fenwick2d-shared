@@ -91,7 +91,8 @@ struct F2dHeader {
     uint32_t drain_seq;               /* 64  futex bumped by a reader releasing under a draining writer (wakes it) */
     uint32_t slotless_rdepth;         /* readers holding with no reader-slot (documented residual) */
     uint64_t stat_ops;                /* 72 */
-    uint8_t  _pad[176];               /* 80..255 */
+    uint8_t  sealed;                  /* 80  0 = mutable, 1 = frozen (read-only; lock-free reads) */
+    uint8_t  _pad[175];               /* 81..255 */
 };
 typedef struct F2dHeader F2dHeader;
 
@@ -114,6 +115,7 @@ typedef struct F2dHandle {
     uint32_t      cached_pid;    /* getpid() cached at last slot claim */
     uint32_t      cached_fork_gen; /* f2d_fork_gen value at last slot claim */
     uint32_t slotless_held; /* read-locks this process holds with no reader-slot */
+    int      readonly;      /* 1 = frozen O_RDONLY/PROT_READ view: lock-free reads, mutation croaks */
 } F2dHandle;
 
 /* ================================================================
@@ -645,6 +647,10 @@ static F2dHandle *f2d_create(const char *path, uint64_t rows, uint64_t cols, mod
             if (!f2d_validate_header((F2dHeader *)base, (uint64_t)st.st_size)) {
                 F2D_ERR("invalid Fenwick2D tree file"); munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
             }
+            if (((F2dHeader *)base)->sealed) {
+                F2D_ERR("%s is frozen (read-only); open it with new_readonly", path);
+                munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
+            }
             flock(fd, LOCK_UN); close(fd);
             return f2d_setup(base, map_size, path, -1);
         }
@@ -681,9 +687,43 @@ static F2dHandle *f2d_open_fd(int fd, char *errbuf) {
     if (!f2d_validate_header((F2dHeader *)base, (uint64_t)st.st_size)) {
         F2D_ERR("invalid Fenwick2D tree table"); munmap(base, ms); return NULL;
     }
+    if (((F2dHeader *)base)->sealed) {
+        F2D_ERR("this Fenwick2D tree is frozen (read-only); open it with new_readonly");
+        munmap(base, ms); return NULL;
+    }
     int myfd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
     if (myfd < 0) { F2D_ERR("fcntl: %s", strerror(errno)); munmap(base, ms); return NULL; }
     return f2d_setup(base, ms, NULL, myfd);
+}
+
+/* Open a FROZEN (sealed) file read-only: O_RDONLY + PROT_READ, no lock ever.
+ * The grid + geometry are immutable in a sealed file, so prefix/rect/point
+ * queries read directly with no reader-slot / rwlock traffic -- the mapping is
+ * never written, so it works from a read-only fd / read-only filesystem and can
+ * be shared PROT_READ across processes (same architecture; the native magic
+ * rejects a wrong-endian file at validation). */
+static F2dHandle *f2d_open_readonly(const char *path, char *errbuf) {
+    if (errbuf) errbuf[0] = '\0';
+    int fd = open(path, O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+    if (fd < 0) { F2D_ERR("open %s: %s", path, strerror(errno)); return NULL; }
+    struct stat st;
+    if (fstat(fd, &st) < 0) { F2D_ERR("fstat %s: %s", path, strerror(errno)); close(fd); return NULL; }
+    if ((uint64_t)st.st_size < sizeof(F2dHeader)) { F2D_ERR("%s: file too small", path); close(fd); return NULL; }
+    size_t ms = (size_t)st.st_size;
+    void *base = mmap(NULL, ms, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);   /* the mapping keeps the file; a read-only view needs no fd (no msync/ftruncate) */
+    if (base == MAP_FAILED) { F2D_ERR("mmap %s: %s", path, strerror(errno)); return NULL; }
+    if (!f2d_validate_header((F2dHeader *)base, (uint64_t)st.st_size)) {
+        F2D_ERR("%s: invalid Fenwick2D tree file", path); munmap(base, ms); return NULL;
+    }
+    if (!((F2dHeader *)base)->sealed) {
+        F2D_ERR("%s is not frozen: call ->freeze on the producer before opening read-only", path);
+        munmap(base, ms); return NULL;
+    }
+    F2dHandle *h = f2d_setup(base, ms, path, -1);   /* munmaps on OOM */
+    if (!h) { F2D_ERR("out of memory"); return NULL; }
+    h->readonly = 1;
+    return h;
 }
 
 static void f2d_destroy(F2dHandle *h) {
@@ -711,6 +751,18 @@ static void f2d_destroy(F2dHandle *h) {
 static inline int f2d_msync(F2dHandle *h) {
     if (!h || !h->base) return 0;
     return msync(h->base, h->mmap_size, MS_SYNC);
+}
+
+/* Seal a grid: make it permanently immutable so it can be shipped and opened
+ * read-only.  Takes the write lock so no update is in flight, publishes the
+ * seal, then flushes it (file/memfd-backed).  Afterwards every mutator croaks
+ * and a read-write reopen is refused. */
+static int f2d_freeze(F2dHandle *h) {
+    f2d_rwlock_wrlock(h);
+    h->hdr->sealed = 1;
+    f2d_rwlock_wrunlock(h);
+    if (h->path || h->backing_fd >= 0) return f2d_msync(h);  /* durability for file/memfd-backed */
+    return 0;   /* anonymous: the seal lives in shared memory (visible to forks); nothing to flush */
 }
 
 /* ================================================================
