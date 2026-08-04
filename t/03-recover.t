@@ -62,4 +62,14 @@ unlink $p;
     undef $r; unlink $p;
 }
 
+# 5. A magic==0 file of the right size but with NON-zero data (not a fresh
+#    ftruncate) is NOT recovered -- recovery only re-inits a provably-empty file.
+{
+    open my $fh, '>', $p or die $!; truncate $fh, $total or die $!; close $fh;
+    open $fh, '+<', $p or die $!; seek $fh, $total - 1, 0; print $fh "\x01"; close $fh;
+    my $f = eval { Data::Fenwick2D::Shared->new($p, $R, $C) };
+    ok(!$f, "new() refuses a magic==0 file that is not all-zero (no clobber of real data)");
+    undef $f; unlink $p;
+}
+
 done_testing;
