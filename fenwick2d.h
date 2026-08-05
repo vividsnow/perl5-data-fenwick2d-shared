@@ -523,9 +523,10 @@ static inline void f2d_init_header(void *base, uint64_t rows, uint64_t cols, uin
     hdr->reader_slots_off = L.reader_slots;
     hdr->tree_off         = L.tree;
     /* Publish magic LAST, as a release store: it is the commit point, so a
-       creator killed before this store leaves magic==0 -- which the
-       crashed-creator recovery treats as an abandoned mid-init file and
-       recovers, instead of a magic-set-but-incomplete header that would brick. */
+       creator killed before it leaves magic==0 and the file is never mistaken
+       for a valid one.  Recovery re-initializes such a file only while it is
+       still all-zero (a kill during the ftruncate or the zeroing above); a kill
+       during the few field stores leaves a file to remove by hand. */
     __atomic_store_n(&hdr->magic, F2D_MAGIC, __ATOMIC_RELEASE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
@@ -675,6 +676,11 @@ static F2dHandle *f2d_create(const char *path, uint64_t rows, uint64_t cols, mod
                     f2d_init_header(base, rows, cols, total);
                     flock(fd, LOCK_UN); close(fd);
                     return f2d_setup(base, map_size, path, -1);
+                }
+                if (((F2dHeader *)base)->magic == 0 && (uint64_t)st.st_size == total
+                    && st.st_uid == geteuid()) {
+                    F2D_ERR("%s: incomplete Fenwick2D tree file left by an interrupted create; remove it and retry", path);
+                    munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
                 }
                 F2D_ERR("invalid Fenwick2D tree file"); munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
             }
