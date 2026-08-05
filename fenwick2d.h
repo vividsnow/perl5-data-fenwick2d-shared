@@ -672,7 +672,6 @@ static F2dHandle *f2d_create(const char *path, uint64_t rows, uint64_t cols, mod
                         F2D_ERR("%s: fchmod: %s", path, strerror(errno));
                         munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
                     }
-                    memset(base, 0, map_size);   /* start from a provably empty grid */
                     f2d_init_header(base, rows, cols, total);
                     flock(fd, LOCK_UN); close(fd);
                     return f2d_setup(base, map_size, path, -1);
