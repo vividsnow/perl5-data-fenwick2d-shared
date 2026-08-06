@@ -1,7 +1,7 @@
 package Data::Fenwick2D::Shared;
 use strict;
 use warnings;
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 require XSLoader;
 XSLoader::load('Data::Fenwick2D::Shared', $VERSION);
 
@@ -131,10 +131,12 @@ anonymous, memfd, or fd-reopened grids) and C<memfd> the backing descriptor.
 
 =head1 SHARING ACROSS PROCESSES
 
-The grid lives in a shared mapping, shared the same three ways as the rest of the
-family: a B<backing file>, an B<anonymous mapping inherited across C<fork>>, or a
-B<memfd> passed to an unrelated process and reopened with
-C<< new_from_fd($fd) >>. Every process's updates land in the one shared grid, and
+The grid lives in a shared mapping, shared the same three ways as the rest of
+the family: a B<backing file>, an B<anonymous mapping inherited across
+C<fork>>, or a B<memfd> passed to an unrelated process and reopened with C<<
+new_from_fd($fd) >>. The descriptor you pass is duplicated
+(C<F_DUPFD_CLOEXEC>), so it stays yours to close and closing it does not
+disturb the handle. Every process's updates land in the one shared grid, and
 queries take only the read lock so many readers proceed concurrently.
 
 =head1 FROZEN (READ-ONLY) MODE
@@ -201,6 +203,16 @@ reclaim it and writers may block until the mapping is recreated. Reaching this
 needs more than 1024 concurrent reader processes on one mapping plus a crash in
 the brief read-lock window; the dead-process slot reclaim keeps the table from
 filling with stale entries, so in practice it is very unlikely.
+
+An interrupted create is recovered too. A creator killed after the backing
+file is sized but before its header is committed leaves a full-size, all-zero
+file. C<new> re-initializes such a file automatically, but only when it is
+exactly the size the requested geometry needs, is owned by your effective uid,
+and is still entirely zero -- a file holding data is never re-initialized. If
+the creator got as far as writing part of the header, the file cannot be told
+apart from a corrupt one and C<new> croaks with C<incomplete Fenwick2D tree
+file left by an interrupted create; remove it and retry>. Such a file never
+held any data, so removing it is safe.
 
 =head1 SEE ALSO
 
